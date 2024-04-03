@@ -1,0 +1,7 @@
+cortex
+files
+gnupg
+server_configs
+logs
+ssl
+.env
