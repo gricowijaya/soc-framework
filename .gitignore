@@ -6,3 +6,4 @@ logs
 ssl
 .env
 misp-docker-compose
+server-configs/
