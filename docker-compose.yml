@@ -1,0 +1,173 @@
+version: "3.4"
+services:
+  thehive:
+    image: strangebee/thehive:5.2
+    restart: unless-stopped
+    depends_on:
+      - cassandra
+      - elasticsearch
+      - minio
+      - cortex.local
+    mem_limit: 1500m
+    ports:
+      - "0.0.0.0:9000:9000"
+    environment:
+      - JVM_OPTS="-Xms1024M -Xmx1024M"
+    command:
+      - --secret
+      - "lab123456789"
+      - "--cql-hostnames"
+      - "cassandra"
+      - "--index-backend"
+      - "elasticsearch"
+      - "--es-hostnames"
+      - "elasticsearch"
+      - "--s3-endpoint"
+      - "http://minio:9002"
+      - "--s3-access-key"
+      - "minioadmin"
+      - "--s3-secret-key"
+      - "minioadmin"
+      - "--s3-use-path-access-style"
+    #If you are familiar with the previous docker compose file you will note that the Cortex ports and keys have been omitted this is because we can now
+    #complete the integration from TheHive GUI directly.
+    volumes:
+      - thehivedata:/etc/thehive/application.conf
+
+  cassandra:
+    image: 'cassandra:4'
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:9042:9042"
+    environment:
+      - CASSANDRA_CLUSTER_NAME=TheHive
+    volumes:
+      - cassandradata:/var/lib/cassandra
+    
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
+    restart: unless-stopped
+    mem_limit: 512m
+    ports:
+      - "0.0.0.0:9200:9200"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - cluster.name=hive
+      - http.host=0.0.0.0
+      - "ES_JAVA_OPTS=-Xms256m -Xmx256m"
+    volumes:
+      - elasticsearchdata:/usr/share/elasticsearch/data
+
+  minio:
+    image: quay.io/minio/minio
+    restart: unless-stopped
+    command: ["minio", "server", "/data", "--console-address", ":9002"]
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "0.0.0.0:9002:9002"
+    volumes:
+      - "miniodata:/data"
+
+#appended .local onto the container name because when we integrate cortex with TheHive using the new GUI menu it only accept a FQDN.
+  cortex.local:
+    image: thehiveproject/cortex:latest
+    restart: unless-stopped
+    environment:
+      - job_directory=/tmp/cortex-jobs
+      - docker_job_directory=/tmp/cortex-jobs
+    volumes:
+      #For analyzers and responders (called neurons, also based on docker containers) to work, we need to bind the hosts docker socket into the cortex container
+      #so it can use the docker service of the host, and share the job directory between the container and the host.
+      #An alternative way of doing this would be to run docker (neurons) within the cortex docker container (docker-ception), the container will need to be run in 
+      #privileged mode and you will need the --start-docker parameter for this work. It is however not advised to run docker containers in priviliged mode because it
+      #grants the docker container root capabilities over the host system which is a security risk. 
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/cortex-jobs:/tmp/cortex-jobs
+      - ./cortex/logs:/var/log/cortex
+      - ./cortex/application.conf:/cortex/application.conf
+    depends_on:
+      - elasticsearch
+    ports:
+      - "0.0.0.0:9001:9001"
+  #appended .local onto the container name because when we integrate MISP with TheHive using the new GUI menu it only accepts a FQDN.
+  misp.local:
+    image: ostefano/misp-docker:core-latest
+    restart: unless-stopped
+    depends_on: 
+      - misp_mysql
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    volumes:
+      - "./server-configs/:/var/www/MISP/app/Config/"
+      - "./logs/:/var/www/MISP/app/tmp/logs/"
+      - "./files/:/var/www/MISP/app/files"
+      - "./ssl/:/etc/nginx/certs"
+      - "./gnupg/:/var/www/MISP/.gnupg/"
+      # customize by replacing ${CUSTOM_PATH} with a path containing 'files/customize_misp.sh'
+      # - "${CUSTOM_PATH}/:/custom/"
+    environment:
+      - "HOSTNAME=${HOSTNAME}"
+      - "CRON_USER_ID=${CRON_USER_ID}"
+      - "DISABLE_IPV6=${DISABLE_IPV6}"
+      # standard settings
+      - "ADMIN_EMAIL=${ADMIN_EMAIL}"
+      - "ADMIN_PASSWORD=${ADMIN_PASSWORD}"
+      - "ADMIN_KEY=${ADMIN_KEY}"
+      - "ADMIN_ORG=${ADMIN_ORG}"
+      - "GPG_PASSPHRASE=${GPG_PASSPHRASE}"
+      # sync server settings (see https://www.misp-project.org/openapi/#tag/Servers for more options)
+      - "SYNCSERVERS=${SYNCSERVERS}"
+      - |
+        SYNCSERVERS_1_DATA=
+        {
+          "remote_org_uuid": "${SYNCSERVERS_1_UUID}",
+          "name": "${SYNCSERVERS_1_NAME}",
+          "authkey": "${SYNCSERVERS_1_KEY}",
+          "url": "${SYNCSERVERS_1_URL}",
+          "pull": true
+        }
+      # mysql settings
+      - "MYSQL_HOST=${MYSQL_HOST:-misp_mysql}"
+      - "MYSQL_PORT=${MYSQL_PORT:-3306}"
+      - "MYSQL_USER=${MYSQL_USER:-mispuser}"
+      - "MYSQL_PASSWORD=${MYSQL_PASSWORD:-example}"
+      - "MYSQL_DATABASE=${MYSQL_DATABASE:-misp}"
+
+  misp_mysql:
+    # We use MariaDB because it supports ARM and has the expected collations
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      - "MYSQL_USER=${MYSQL_USER:-misp}"
+      - "MYSQL_PASSWORD=${MYSQL_PASSWORD:-example}"
+      - "MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-password}"
+      - "MYSQL_DATABASE=${MYSQL_DATABASE:-misp}"
+    volumes:
+      - mispsqldata:/var/lib/mysql
+    cap_add:
+      - SYS_NICE  # CAP_SYS_NICE Prevent runaway mysql log
+
+  redis:
+    image: redis:latest
+
+  misp-modules:
+    image: ostefano/misp-docker:modules-latest
+    environment:
+      - "REDIS_BACKEND=redis"
+    depends_on:
+      - redis
+      - misp_mysql
+
+  #  #removed the cortex volumes as we no longer require it, cortex will share the /tmp directory for jobs, the logs and application files will be stored in the cortex folder
+  #in the same directory on the host where the docker-compose.yml resides for ease of access. 
+volumes:
+  miniodata:
+  cassandradata:
+  elasticsearchdata:
+  thehivedata:
+  mispsqldata:
+
